@@ -1,20 +1,17 @@
 import axios from 'axios';
 
+const BASE_URL =
+  process.env.REACT_APP_API_BASE_URL?.replace(/\/+$/, '') || '';
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: `${BASE_URL}/api`,
   timeout: 15000,
 });
 
-/* convert classroom-style regex to backend regex
-   UI uses:
-   +  => OR
-   *  => Kleene closure
-*/
 function normalizeRegex(regex) {
   return regex.replace(/\+/g, '|');
 }
 
-// Convert regex
 export const convertRegex = async (regex) => {
   try {
     const normalized = normalizeRegex(regex);
@@ -26,7 +23,6 @@ export const convertRegex = async (regex) => {
   }
 };
 
-// Simulate input
 export const simulateInput = async (regex, input) => {
   try {
     const normalized = normalizeRegex(regex);
