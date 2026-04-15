@@ -148,6 +148,30 @@ def move(states, sym, transitions):
                 out.add(t['to'])
     return out
 
+def _build_trans_index(transitions):
+    """Build {(from, sym): [to, ...]} index for O(1) lookup."""
+    idx = defaultdict(list)
+    for t in transitions:
+        idx[(t['from'], t['sym'])].append(t['to'])
+    return idx
+
+def move_indexed(states, sym, idx):
+    out = set()
+    for s in states:
+        out.update(idx.get((s, sym), []))
+    return out
+
+def eps_closure_indexed(states, eps_idx):
+    closure = set(states)
+    stack = list(states)
+    while stack:
+        s = stack.pop()
+        for nxt in eps_idx.get(s, []):
+            if nxt not in closure:
+                closure.add(nxt)
+                stack.append(nxt)
+    return frozenset(closure)
+
 def reachable_states(start, transitions):
     g = defaultdict(list)
     for t in transitions:
@@ -667,13 +691,34 @@ def subset_construction_from_nfa(nfa):
     trans = nfa['transitions']
     alphabet = nfa.get('alphabet') or _alphabet_from_transitions(trans)
 
-    start_set = frozenset([nfa['start']])
+    # Build fast lookup indexes
+    idx     = _build_trans_index(trans)
+    eps_idx = defaultdict(list)
+    for t in trans:
+        if t['sym'] == 'ε':
+            eps_idx[t['from']].append(t['to'])
+
+    # For ε-free NFA (position NFA), eps_closure is identity
+    has_eps = any(t['sym'] == 'ε' for t in trans)
+
+    def closure(states):
+        if has_eps:
+            return eps_closure_indexed(states, eps_idx)
+        return frozenset(states)
+
+    def move_sym(states, sym):
+        return move_indexed(states, sym, idx)
+
+    start_set = closure([nfa['start']])
     dfa_states = {}
     dfa_trans = []
     dfa_steps = []
     worklist = [start_set]
     visited = set()
     _did = [0]
+
+    # Safety cap: prevent exponential blowup on very large regexes
+    MAX_DFA_STATES = 512
 
     def get_id(fs):
         if fs not in dfa_states:
@@ -695,13 +740,13 @@ def subset_construction_from_nfa(nfa):
         current_new_transitions = []
 
         for sym in alphabet:
-            moved = sorted(list(move(cur, sym, trans)))
+            moved = sorted(list(move_sym(cur, sym)))
             step_moves[sym] = moved
 
             if not moved:
                 continue
 
-            nxt = frozenset(moved)
+            nxt = closure(moved)
             to_id = get_id(nxt)
 
             edge = {'from': from_id, 'sym': sym, 'to': to_id}
@@ -711,18 +756,21 @@ def subset_construction_from_nfa(nfa):
             if nxt not in visited and nxt not in worklist:
                 worklist.append(nxt)
 
-        accept_states = [
-            get_id(fs)
-            for fs in dfa_states
+            # Cap: stop adding new states if limit reached
+            if _did[0] >= MAX_DFA_STATES:
+                worklist.clear()
+                break
+
+        accept_states = sorted(_uniq([
+            get_id(fs) for fs in dfa_states
             if any(s in nfa_accepts for s in fs)
-        ]
-        accept_states = sorted(_uniq(accept_states))
+        ]))
 
         dfa_steps.append({
             'dfa_state': from_id,
             'nfa_states': sorted(list(cur)),
             'label': f"D{from_id} = {{{', '.join(f'q{s}' for s in sorted(cur))}}}",
-            'description': f"Create DFA state D{from_id} from the NFA state set {sorted(list(cur))}, then add its outgoing transitions.",
+            'description': f"Create DFA state D{from_id} from NFA states {sorted(list(cur))}, then add outgoing transitions.",
             'moves': {sym: step_moves[sym] for sym in alphabet},
             'states': list(range(_did[0])),
             'transitions': list(dfa_trans),
@@ -743,12 +791,10 @@ def subset_construction_from_nfa(nfa):
             }
         })
 
-    accept_states = [
-        get_id(fs)
-        for fs in dfa_states
+    accept_states = sorted(_uniq([
+        get_id(fs) for fs in dfa_states
         if any(s in nfa_accepts for s in fs)
-    ]
-    accept_states = sorted(_uniq(accept_states))
+    ]))
 
     return {
         'start': get_id(start_set),
@@ -912,63 +958,59 @@ def minimize_dfa(dfa):
 # ══════════════════════════════════════════════
 def simulate_enfa(enfa, input_str):
     trans = enfa['transitions']
-    current = eps_closure([enfa['start']], trans)
+    # Build epsilon index for fast closure
+    eps_idx = defaultdict(list)
+    for t in trans:
+        if t['sym'] == 'ε':
+            eps_idx[t['from']].append(t['to'])
+    sym_idx = _build_trans_index(trans)
+
+    current = eps_closure_indexed([enfa['start']], eps_idx)
     trace = [{'char': None, 'states': sorted(list(current))}]
 
     for ch in input_str:
-        moved = set()
-        for s in current:
-            for t in trans:
-                if t['from'] == s and t['sym'] == ch:
-                    moved.add(t['to'])
-
-        current = eps_closure(list(moved), trans)
+        moved = move_indexed(current, ch, sym_idx)
+        current = eps_closure_indexed(list(moved), eps_idx)
         trace.append({'char': ch, 'states': sorted(list(current))})
-
         if not current:
             break
 
-    return enfa['accept'] in current, trace
+    accept = enfa.get('accept')
+    return (accept in current) if accept is not None else False, trace
 
 def simulate_nfa(nfa, input_str):
+    sym_idx = _build_trans_index(nfa['transitions'])
     current = {nfa['start']}
     trace = [{'char': None, 'states': sorted(list(current))}]
     accept_states = set(nfa.get('accept_states', []))
-    trans = nfa['transitions']
 
     for ch in input_str:
-        nxt = set()
-        for s in current:
-            for t in trans:
-                if t['from'] == s and t['sym'] == ch:
-                    nxt.add(t['to'])
-        current = nxt
+        current = move_indexed(current, ch, sym_idx)
         trace.append({'char': ch, 'states': sorted(list(current))})
-
         if not current:
             break
 
     return bool(current & accept_states), trace
 
 def simulate_dfa(dfa, input_str):
+    # Build O(1) lookup dict
+    delta = {}
+    for t in dfa['transitions']:
+        delta[(t['from'], t['sym'])] = t['to']
+
     cur = dfa['start']
     trace = [{'char': None, 'state': cur}]
+    accept_set = set(dfa['accept_states'])
 
     for ch in input_str:
-        nxt = None
-        for t in dfa['transitions']:
-            if t['from'] == cur and t['sym'] == ch:
-                nxt = t['to']
-                break
-
+        nxt = delta.get((cur, ch))
         if nxt is None:
             trace.append({'char': ch, 'state': None, 'dead': True})
             return False, trace
-
         cur = nxt
         trace.append({'char': ch, 'state': cur})
 
-    return cur in dfa['accept_states'], trace
+    return cur in accept_set, trace
 
 
 # ══════════════════════════════════════════════
@@ -982,8 +1024,11 @@ def convert():
     if not regex:
         return jsonify({'error': 'No regex provided'}), 400
 
+    if len(regex) > 200:
+        return jsonify({'error': 'Regex too long (max 200 characters)'}), 400
+
     if '?' in regex:
-        return jsonify({'error': "Operator '?' is no longer supported. Use only +, |, *, parentheses, characters, and ε."}), 400
+        return jsonify({'error': "Operator '?' is not supported. Use +, |, *, parentheses, characters, and ε."}), 400
 
     try:
         reset()
@@ -1000,6 +1045,12 @@ def convert():
 
         nfa_table = enfa_to_nfa_table(enfa)
         nfa = build_visual_reduced_nfa(ast)
+
+        # Guard: if NFA has too many states, skip expensive DFA steps
+        MAX_NFA_FOR_DFA = 80
+        if len(nfa.get('states', [])) > MAX_NFA_FOR_DFA:
+            return jsonify({'error': f'Regex produces an NFA with {len(nfa["states"])} states — too large for DFA conversion in the browser. Try a simpler regex.'}), 400
+
         dfa = subset_construction_from_nfa(nfa)
         dfa = complete_dfa(dfa)
         min_dfa = minimize_dfa(dfa)
@@ -1015,10 +1066,12 @@ def convert():
             'min_dfa': min_dfa
         })
 
+    except RecursionError:
+        return jsonify({'error': 'Regex is too deeply nested. Simplify the expression.'}), 400
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
-        return jsonify({'error': f'Internal: {e}'}), 500
+        return jsonify({'error': f'Internal error: {e}'}), 500
 
 
 @app.route('/api/simulate', methods=['POST'])
@@ -1030,8 +1083,11 @@ def simulate():
     if not regex:
         return jsonify({'error': 'No regex'}), 400
 
+    if len(regex) > 200:
+        return jsonify({'error': 'Regex too long (max 200 characters)'}), 400
+
     if '?' in regex:
-        return jsonify({'error': "Operator '?' is no longer supported. Use only +, |, *, parentheses, characters, and ε."}), 400
+        return jsonify({'error': "Operator '?' is not supported. Use +, |, *, parentheses, characters, and ε."}), 400
 
     try:
         reset()
@@ -1064,10 +1120,12 @@ def simulate():
             'input': inp
         })
 
+    except RecursionError:
+        return jsonify({'error': 'Regex is too deeply nested. Simplify the expression.'}), 400
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
-        return jsonify({'error': f'Internal: {e}'}), 500
+        return jsonify({'error': f'Internal error: {e}'}), 500
 
 
 @app.route('/api/health')

@@ -134,9 +134,10 @@ function reverseDistanceToAccept(states, accepts, transitions) {
 }
 
 function assignGenericStepLayout(nodes, data, W, H) {
+  const safeNodes = nodes.filter(Boolean);
   const nodeMap = {};
-  nodes.forEach((n) => { nodeMap[n.id] = n; });
-  const states = nodes.map((n) => n.id);
+  safeNodes.forEach((n) => { nodeMap[n.id] = n; });
+  const states = safeNodes.map((n) => n.id);
   const transitions = data.transitions || [];
   const start = data.start;
   const accepts = data.accept_states?.length
@@ -168,10 +169,10 @@ function assignGenericStepLayout(nodes, data, W, H) {
     }
   }
 
-  nodes.forEach((n) => { if (levels[n.id] === undefined) levels[n.id] = 1; });
+  safeNodes.forEach((n) => { if (levels[n.id] === undefined) levels[n.id] = 1; });
 
   const grouped = {};
-  nodes.forEach((n) => {
+  safeNodes.forEach((n) => {
     const lv = levels[n.id];
     if (!grouped[lv]) grouped[lv] = [];
     grouped[lv].push(n);
@@ -657,9 +658,10 @@ export function drawGraph(container, data, mode, highlightStates = new Set(), pe
     });
 
     // Re-layout all nodes so new ones get positions; preserve existing positions
-    const allNodes = (data.states || []).map((id) => nodeMap[id]);
+    const allNodes = (data.states || []).filter((id) => id !== undefined && id !== null && nodeMap[id]).map((id) => nodeMap[id]);
+
     const prevPositions = {};
-    allNodes.forEach((n) => { prevPositions[n.id] = { x: n.x, y: n.y }; });
+    allNodes.forEach((n) => { if (n) prevPositions[n.id] = { x: n.x, y: n.y }; });
 
     const specialPlaced = assignSpecialLayout(allNodes, data, W, H, mode);
     if (!specialPlaced) assignGenericStepLayout(allNodes, data, W, H);
@@ -707,7 +709,7 @@ export function drawGraph(container, data, mode, highlightStates = new Set(), pe
     function edgePath(d) { return computeEdgePath(d, nodeMap); }
 
     // Add new node elements
-    const newNodeData = brandNewIds.map((id) => nodeMap[id]);
+    const newNodeData = brandNewIds.map((id) => nodeMap[id]).filter(Boolean);
     const newNodeSel = gNodes.selectAll('.node').data(newNodeData, (d) => d.id)
       .enter().append('g').attr('class', 'node').style('cursor', 'grab')
       .attr('opacity', 0).attr('transform', (d) => `translate(${d.x},${d.y})`);
@@ -856,7 +858,7 @@ export function drawGraph(container, data, mode, highlightStates = new Set(), pe
     return 'normal';
   }
 
-  const nodes = (data.states || []).map((id) => ({
+  const nodes = (data.states || []).filter((id) => id !== undefined && id !== null).map((id) => ({
     id,
     label:    mode === 'dfa' ? `D${id}` : `q${id}`,
     sublabel: mode === 'dfa' ? formatDfaSubLabel(stateLabels[String(id)]) : '',
